@@ -1,0 +1,93 @@
+id: finra-daily-backfill
+namespace: finra.analytics
+
+description: |
+  Daily batch job to backfill FINRA data for watchlist symbols
+  - Fetches Reg SHO daily short sale volume
+  - Updates threshold list status
+  - Computes derived metrics
+  - Pre-warms cache for popular symbols
+
+tasks:
+  - id: fetch_watchlist
+    type: io.kestra.plugin.core.log.Log
+    message: "Fetching watchlist symbols from database..."
+    # In production, query database for symbols to track
+    # SELECT DISTINCT symbol FROM dim_symbols WHERE is_active = TRUE
+
+  - id: fetch_regsho
+    type: io.kestra.plugin.scripts.shell.Commands
+    description: Fetch Reg SHO data for each symbol
+    commands:
+      - |
+        # Example: fetch for top symbols
+        SYMBOLS=("NVDA" "AAPL" "TSLA" "GME" "AMC")
+
+        for SYMBOL in "${SYMBOLS[@]}"; do
+          echo "Fetching Reg SHO for $SYMBOL..."
+
+          # Call internal API to fetch and cache
+          curl -s "http://app:3000/api/finra/regsho?symbol=$SYMBOL" \
+            -H "Content-Type: application/json" > /dev/null
+
+          # Small delay to respect rate limits
+          sleep 0.1
+        done
+
+  - id: fetch_threshold
+    type: io.kestra.plugin.scripts.shell.Commands
+    description: Fetch latest threshold list
+    commands:
+      - |
+        echo "Fetching threshold list..."
+        curl -s "http://app:3000/api/finra/threshold" \
+          -H "Content-Type: application/json" > /tmp/threshold.json
+
+        # In production: parse and insert into dim_threshold_status table
+        echo "Threshold list fetched and cached"
+
+  - id: fetch_short_interest
+    type: io.kestra.plugin.scripts.shell.Commands
+    description: Fetch short interest for watchlist (semi-monthly)
+    runIf: "{{ now() | date('d') in ['1', '15'] }}"
+    commands:
+      - |
+        # Only run on 1st and 15th of month (settlement dates)
+        SYMBOLS=("NVDA" "AAPL" "TSLA" "GME" "AMC")
+
+        for SYMBOL in "${SYMBOLS[@]}"; do
+          echo "Fetching Short Interest for $SYMBOL..."
+          curl -s "http://app:3000/api/finra/shortinterest?symbol=$SYMBOL" \
+            -H "Content-Type: application/json" > /dev/null
+          sleep 0.1
+        done
+
+  - id: compute_metrics
+    type: io.kestra.plugin.core.log.Log
+    message: "Computing derived metrics (DTC, Z-scores, trends)..."
+    # In production: call Python/Node script to compute metrics
+    # and insert into metrics_daily and metrics_semimonthly tables
+
+  - id: invalidate_cache
+    type: io.kestra.plugin.scripts.shell.Commands
+    description: Invalidate old cache entries
+    commands:
+      - |
+        # Connect to Redis and flush old entries
+        # redis-cli --scan --pattern "regsho:*" | xargs redis-cli del
+
+  - id: completion_log
+    type: io.kestra.plugin.core.log.Log
+    level: INFO
+    message: "Daily backfill completed successfully at {{ now() }}"
+
+triggers:
+  - id: daily_schedule
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "0 7 * * 1-5"  # 7 AM every weekday
+    timezone: America/New_York
+
+  - id: market_close
+    type: io.kestra.plugin.core.trigger.Schedule
+    cron: "30 16 * * 1-5"  # 4:30 PM ET every weekday (after market close)
+    timezone: America/New_York

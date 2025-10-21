@@ -1,0 +1,106 @@
+version: '3.8'
+
+services:
+  # PostgreSQL with TimescaleDB
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    container_name: finra-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: finra_analytics
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./lib/db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql
+    networks:
+      - finra-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis cache
+  redis:
+    image: redis:7-alpine
+    container_name: finra-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - finra-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    command: redis-server --appendonly yes
+
+  # Next.js application (dev mode)
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: finra-app
+    ports:
+      - "3000:3000"
+    environment:
+      # FINRA API credentials (set these in .env file)
+      - FINRA_CLIENT_ID=${FINRA_CLIENT_ID}
+      - FINRA_CLIENT_SECRET=${FINRA_CLIENT_SECRET}
+      - FINRA_TOKEN_URL=${FINRA_TOKEN_URL:-https://ews.fip.finra.org/fip/rest/ews/oauth2/access_token}
+      - FINRA_API_BASE_URL=${FINRA_API_BASE_URL:-https://api.finra.org}
+
+      # Database
+      - DATABASE_URL=postgresql://postgres:postgres@postgres:5432/finra_analytics
+
+      # Redis
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+
+      # Cache TTL
+      - CACHE_TTL_REGSHO=300
+      - CACHE_TTL_SHORT_INTEREST=86400
+      - CACHE_TTL_THRESHOLD=300
+
+      - NODE_ENV=development
+    volumes:
+      - .:/app
+      - /app/node_modules
+      - /app/.next
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - finra-network
+    command: npm run dev
+
+  # Kestra orchestration (optional, for batch jobs)
+  kestra:
+    image: kestra/kestra:latest
+    container_name: finra-kestra
+    ports:
+      - "8080:8080"
+    environment:
+      - KESTRA_CONFIGURATION=/app/kestra-config.yml
+    volumes:
+      - kestra_data:/app/storage
+      - ./kestra:/app/flows
+    networks:
+      - finra-network
+    profiles:
+      - orchestration
+
+volumes:
+  postgres_data:
+  redis_data:
+  kestra_data:
+
+networks:
+  finra-network:
+    driver: bridge
